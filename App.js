@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import * as Location from "expo-location";
+import * as SQLite from "expo-sqlite";
 import { FlatList, StyleSheet, View } from "react-native";
 import {
   Appbar,
@@ -11,118 +13,160 @@ import {
 } from "react-native-paper";
 import myColors from "./assets/colors.json";
 import myColorsDark from "./assets/colorsDark.json";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function App() {
-  const [isSwitchOn, setIsSwitchOn] = useState(false); // variável para controle do darkMode
-  const [isLoading, setIsLoading] = useState(false); // variável para controle do loading do button
-  const [locations, setLocations] = useState(null); // variável para armazenar as localizações
+  const STORAGE_KEY = "@Modo";
+  const db = SQLite.openDatabase("locations.db");
 
-  // Carrega tema default da lib RN PAPER com customização das cores. Para customizar o tema, veja:
-  // https://callstack.github.io/react-native-paper/docs/guides/theming/#creating-dynamic-theme-colors
+  const [isSwitchOn, setIsSwitchOn] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [locations, setLocations] = useState([]);
   const [theme, setTheme] = useState({
     ...DefaultTheme,
-    myOwnProperty: true,
     colors: myColors.colors,
   });
 
-  // load darkMode from AsyncStorage
-  async function loadDarkMode() {}
+  // Cria tabela
+  useEffect(() => {
+    db.transaction((tx) => {
+      tx.executeSql(
+        "CREATE TABLE IF NOT EXISTS locations (id INTEGER PRIMARY KEY AUTOINCREMENT, latitude REAL, longitude REAL, date TEXT);"
+      );
+    });
+  }, []);
 
-  // darkMode switch event
-  async function onToggleSwitch() {
-    setIsSwitchOn(!isSwitchOn);
-  }
-
-  // get location (bottao capturar localização)
-  async function getLocation() {
-    setIsLoading(true);
-
-    // Localização fake, substituir por localização real do dispositivo
-    const coords = {
-      latitude: -23.5505199,
-      longitude: -46.6333094,
-    };
-
-    setIsLoading(false);
-  }
-
-  // load locations from db sqlite - faz a leitura das localizações salvas no banco de dados
-  async function loadLocations() {
-    setIsLoading(true);
-
-    // generate fake locations
-    const locations = [];
-    for (let i = 0; i < 5; i++) {
-      locations.push({
-        id: i,
-        latitude: -23.5505199 + i,
-        longitude: -46.6333094 + i,
-      });
+  // Dark mode
+  const saveMode = async (value) => {
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY, value ? "true" : "false");
+    } catch (e) {
+      console.log("Erro ao salvar modo:", e);
     }
+  };
 
-    setLocations(locations);
-    setIsLoading(false);
-  }
+  const loadDarkMode = async () => {
+    try {
+      const value = await AsyncStorage.getItem(STORAGE_KEY);
+      if (value !== null) setIsSwitchOn(value === "true");
+    } catch (e) {
+      console.log("Erro ao carregar modo:", e);
+    }
+  };
 
-  // Use Effect para carregar o darkMode e as localizações salvas no banco de dados
-  // É executado apenas uma vez, quando o componente é montado
+  const onToggleSwitch = async () => {
+    const newValue = !isSwitchOn;
+    setIsSwitchOn(newValue);
+    await saveMode(newValue);
+  };
+
+  useEffect(() => {
+    setTheme({
+      ...DefaultTheme,
+      colors: isSwitchOn ? myColorsDark.colors : myColors.colors,
+    });
+  }, [isSwitchOn]);
+
   useEffect(() => {
     loadDarkMode();
     loadLocations();
   }, []);
 
-  // Efetiva a alteração do tema dark/light quando a variável isSwitchOn é alterada
-  // É executado sempre que a variável isSwitchOn é alterada
-  useEffect(() => {
-    if (isSwitchOn) {
-      setTheme({ ...theme, colors: myColorsDark.colors });
-    } else {
-      setTheme({ ...theme, colors: myColors.colors });
+  function loadLocations() {
+    db.transaction((tx) => {
+      tx.executeSql(
+        "SELECT * FROM locations ORDER BY id DESC;",
+        [],
+        (txObj, resultSet) => setLocations(resultSet.rows._array),
+        (txObj, error) => console.log("Erro ao carregar:", error)
+      );
+    });
+  }
+
+  async function saveLocationToDB(latitude, longitude) {
+    const date = new Date().toLocaleString();
+    db.transaction((tx) => {
+      tx.executeSql(
+        "INSERT INTO locations (latitude, longitude, date) VALUES (?, ?, ?);",
+        [latitude, longitude, date],
+        () => loadLocations(),
+        (txObj, error) => console.log("Erro ao salvar:", error)
+      );
+    });
+  }
+
+  async function getLocation() {
+    try {
+      setIsLoading(true);
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        alert("Permissão negada.");
+        return;
+      }
+
+      const currentLocation = await Location.getCurrentPositionAsync({});
+      const { latitude, longitude } = currentLocation.coords;
+      saveLocationToDB(latitude, longitude);
+
+    } catch (error) {
+      console.log("Erro ao capturar localização:", error);
+    } finally {
+      setIsLoading(false);
     }
-  }, [isSwitchOn]);
+  }
 
   return (
     <PaperProvider theme={theme}>
       <Appbar.Header>
         <Appbar.Content title="My Location BASE" />
       </Appbar.Header>
-      <View style={{ backgroundColor: theme.colors.background }}>
+
+      <View style={{ backgroundColor: theme.colors.background, flex: 1 }}>
         <View style={styles.containerDarkMode}>
-          <Text>Dark Mode</Text>
+          <Text style={{ color: theme.colors.onBackground }}>Dark Mode</Text>
           <Switch value={isSwitchOn} onValueChange={onToggleSwitch} />
         </View>
+
         <Button
           style={styles.containerButton}
           icon="map"
           mode="contained"
           loading={isLoading}
-          onPress={() => getLocation()}
+          onPress={getLocation}
         >
           Capturar localização
+        </Button>
+
+        <Button
+          style={styles.containerButton}
+          icon="delete"
+          mode="outlined"
+          onPress={() => {
+            db.transaction((tx) => tx.executeSql("DELETE FROM locations;"));
+            setLocations([]);
+          }}
+        >
+          Limpar localizações
         </Button>
 
         <FlatList
           style={styles.containerList}
           data={locations}
+          keyExtractor={(item) => item.id.toString()}
           renderItem={({ item }) => (
             <List.Item
-              title={`Localização ${item.id}`}
-              description={`Latitude: ${item.latitude} | Longitude: ${item.longitude}`}
-            ></List.Item>
+              title={`Lat: ${item.latitude.toFixed(5)}, Lon: ${item.longitude.toFixed(5)}`}
+              description={item.date}
+              left={(props) => <List.Icon {...props} icon="map-marker" />}
+            />
           )}
-        ></FlatList>
+        />
       </View>
     </PaperProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#fff",
-    alignItems: "center",
-    justifyContent: "center",
-  },
   containerDarkMode: {
     margin: 10,
     flexDirection: "row",
@@ -134,6 +178,5 @@ const styles = StyleSheet.create({
   },
   containerList: {
     margin: 10,
-    height: "100%",
   },
 });
