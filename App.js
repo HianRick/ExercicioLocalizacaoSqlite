@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import * as Location from "expo-location";
-import * as SQLite from "expo-sqlite";
 import { FlatList, StyleSheet, View } from "react-native";
 import {
   Appbar,
@@ -14,10 +13,11 @@ import {
 import myColors from "./assets/colors.json";
 import myColorsDark from "./assets/colorsDark.json";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { openDatabaseAsync } from "expo-sqlite";
 
 export default function App() {
   const STORAGE_KEY = "@Modo";
-  const db = SQLite.openDatabase("locations.db");
+  const [db, setDb] = useState(null);
 
   const [isSwitchOn, setIsSwitchOn] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -27,13 +27,23 @@ export default function App() {
     colors: myColors.colors,
   });
 
-  // Cria tabela
+  // Inicializa o banco e cria tabela
   useEffect(() => {
-    db.transaction((tx) => {
-      tx.executeSql(
-        "CREATE TABLE IF NOT EXISTS locations (id INTEGER PRIMARY KEY AUTOINCREMENT, latitude REAL, longitude REAL, date TEXT);"
-      );
-    });
+    (async () => {
+      const database = await openDatabaseAsync("locations.db");
+      setDb(database);
+
+      await database.execAsync(`
+        CREATE TABLE IF NOT EXISTS locations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          latitude REAL,
+          longitude REAL,
+          date TEXT
+        );
+      `);
+
+      await loadLocations(database);
+    })();
   }, []);
 
   // Dark mode
@@ -69,30 +79,22 @@ export default function App() {
 
   useEffect(() => {
     loadDarkMode();
-    loadLocations();
   }, []);
 
-  function loadLocations() {
-    db.transaction((tx) => {
-      tx.executeSql(
-        "SELECT * FROM locations ORDER BY id DESC;",
-        [],
-        (txObj, resultSet) => setLocations(resultSet.rows._array),
-        (txObj, error) => console.log("Erro ao carregar:", error)
-      );
-    });
+  async function loadLocations(database = db) {
+    if (!database) return;
+    const rows = await database.getAllAsync("SELECT * FROM locations ORDER BY id DESC;");
+    setLocations(rows);
   }
 
   async function saveLocationToDB(latitude, longitude) {
+    if (!db) return;
     const date = new Date().toLocaleString();
-    db.transaction((tx) => {
-      tx.executeSql(
-        "INSERT INTO locations (latitude, longitude, date) VALUES (?, ?, ?);",
-        [latitude, longitude, date],
-        () => loadLocations(),
-        (txObj, error) => console.log("Erro ao salvar:", error)
-      );
-    });
+    await db.runAsync(
+      "INSERT INTO locations (latitude, longitude, date) VALUES (?, ?, ?);",
+      [latitude, longitude, date]
+    );
+    await loadLocations();
   }
 
   async function getLocation() {
@@ -106,13 +108,18 @@ export default function App() {
 
       const currentLocation = await Location.getCurrentPositionAsync({});
       const { latitude, longitude } = currentLocation.coords;
-      saveLocationToDB(latitude, longitude);
-
+      await saveLocationToDB(latitude, longitude);
     } catch (error) {
       console.log("Erro ao capturar localização:", error);
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function clearLocations() {
+    if (!db) return;
+    await db.execAsync("DELETE FROM locations;");
+    setLocations([]);
   }
 
   return (
@@ -141,10 +148,7 @@ export default function App() {
           style={styles.containerButton}
           icon="delete"
           mode="outlined"
-          onPress={() => {
-            db.transaction((tx) => tx.executeSql("DELETE FROM locations;"));
-            setLocations([]);
-          }}
+          onPress={clearLocations}
         >
           Limpar localizações
         </Button>
